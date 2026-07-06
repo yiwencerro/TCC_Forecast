@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TCC Demand Planning — Forecast</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --navy:    #0F1C2E;
+      --navy-2:  #1A2D44;
+      --navy-3:  #243F5C;
+      --slate:   #4A6580;
+      --mist:    #EEF2F7;
+      --white:   #FFFFFF;
+      --border:  #D8E2EE;
+      --border-s:#B0C4D8;
+      --text:    #0F1C2E;
+      --text-2:  #3A4F63;
+      --text-3:  #7A90A4;
+      --amber:   #B45309;
+      --amber-bg:#FEF3C7;
+      --amber-bd:#FCD34D;
+      --blue:    #1D4ED8;
+      --blue-bg: #EFF6FF;
+      --blue-bd: #BFDBFE;
+      --green:   #166534;
+      --green-bg:#DCFCE7;
+      --red:     #991B1B;
+      --red-bg:  #FEE2E2;
+      --font:    'Segoe UI', system-ui, -apple-system, sans-serif;
+      --mono:    'SF Mono', 'Consolas', 'Monaco', monospace;
+      --radius:  5px;
+      --shadow:  0 1px 3px rgba(15,28,46,.08), 0 1px 2px rgba(15,28,46,.04);
+    }
+    html { font-size: 13px; }
+    body { font-family: var(--font); background: var(--mist); color: var(--text); line-height: 1.45; min-height: 100vh; }
+
+    /* ── TOP CHROME ── */
+    .topbar {
+      background: var(--navy);
+      padding: 0 24px;
+      display: flex; align-items: center; gap: 16px;
+      height: 52px; position: sticky; top: 0; z-index: 100;
+      box-shadow: 0 2px 8px rgba(0,0,0,.25);
+    }
+    .topbar-logo { font-size: 15px; font-weight: 700; color: #fff; letter-spacing: -.3px; white-space: nowrap; }
+    .topbar-logo span { color: #60A5FA; }
+    .topbar-sub { font-size: 11px; color: #93B4CC; border-left: 1px solid var(--navy-3); padding-left: 14px; white-space: nowrap; }
+    .topbar-right { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+    /* ── BUTTONS ── */
+    button {
+      cursor: pointer; font-family: var(--font); font-size: 12px; font-weight: 500;
+      border-radius: var(--radius); border: 1px solid var(--border-s);
+      background: var(--white); color: var(--text-2);
+      padding: 5px 12px; transition: background .12s, border-color .12s;
+      white-space: nowrap;
+    }
+    button:hover:not(:disabled) { background: var(--mist); border-color: var(--slate); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .btn-primary { background: #2563EB; color: #fff; border-color: #1D4ED8; }
+    .btn-primary:hover:not(:disabled) { background: #1D4ED8; border-color: #1E40AF; }
+    .btn-ghost { background: transparent; border-color: #3A5472; color: #93B4CC; }
+    .btn-ghost:hover:not(:disabled) { background: var(--navy-3); border-color: #5A7A9A; color: #fff; }
+    .btn-sm { padding: 3px 8px; font-size: 11px; }
+    .btn-icon { padding: 5px 8px; }
+
+    /* ── INPUTS ── */
+    input, select {
+      font-family: var(--font); font-size: 12px;
+      border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 5px 8px; background: var(--white); color: var(--text);
+      transition: border-color .12s, box-shadow .12s;
+    }
+    input:focus, select:focus {
+      outline: none; border-color: #2563EB;
+      box-shadow: 0 0 0 2px rgba(37,99,235,.15);
+    }
+    input[type=number] { -moz-appearance: textfield; }
+    input[type=number]::-webkit-inner-spin-button { opacity: .4; }
+    input[type=search]::-webkit-search-cancel-button { cursor: pointer; }
+
+    /* ── SETUP PANEL ── */
+    .setup-wrap { display: flex; align-items: center; justify-content: center; min-height: calc(100vh - 52px); padding: 24px; }
+    .setup-card {
+      background: var(--white); border: 1px solid var(--border);
+      border-radius: 10px; padding: 32px; max-width: 480px; width: 100%;
+      box-shadow: var(--shadow);
+    }
+    .setup-card h2 { font-size: 16px; margin-bottom: 6px; }
+    .setup-card .sub { font-size: 12px; color: var(--text-3); margin-bottom: 20px; line-height: 1.65; }
+    .form-label { font-size: 10px; font-weight: 700; color: var(--text-3); text-transform: uppercase; letter-spacing: .06em; display: block; margin-bottom: 5px; }
+    .form-group { margin-bottom: 14px; }
+    .form-group input { width: 100%; }
+    .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 16px; }
+    .info-cell { background: var(--mist); border-radius: var(--radius); padding: 8px 10px; }
+    .info-cell .lbl { font-size: 9px; font-weight: 700; color: var(--text-3); text-transform: uppercase; letter-spacing: .06em; }
+    .info-cell .val { font-size: 12px; font-weight: 600; margin-top: 2px; }
+
+    /* ── PAGE BODY ── */
+    .page { padding: 16px 20px; }
+
+    /* ── BANNER ── */
+    .banner {
+      background: var(--white); border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px 14px; margin-bottom: 12px;
+      display: flex; align-items: center; gap: 10px; font-size: 12px;
+    }
+    .banner.loading { border-color: var(--blue-bd); background: var(--blue-bg); color: var(--blue); }
+    .banner.error   { border-color: #FCA5A5; background: var(--red-bg); color: var(--red); }
+    .spinner { width: 14px; height: 14px; border: 2px solid var(--blue-bd); border-top-color: var(--blue); border-radius: 50%; animation: spin .7s linear infinite; flex-shrink: 0; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── STATS ROW ── */
+    .stats { display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+    .stat-card { background: var(--white); border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; box-shadow: var(--shadow); }
+    .stat-card .lbl { font-size: 10px; font-weight: 700; color: var(--text-3); text-transform: uppercase; letter-spacing: .06em; }
+    .stat-card .val { font-size: 22px; font-weight: 700; color: var(--text); line-height: 1.15; }
+    .stat-card .sub { font-size: 10px; color: var(--text-3); }
+
+    /* ── SEASON BAR ── */
+    .season-bar {
+      background: var(--navy); border-radius: 8px; padding: 10px 16px;
+      display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .season-label { font-size: 10px; font-weight: 700; color: #93B4CC; text-transform: uppercase; letter-spacing: .06em; margin-right: 4px; white-space: nowrap; }
+    .season-chips { display: flex; gap: 4px; flex: 1; flex-wrap: wrap; }
+    .s-chip { flex: 1; min-width: 52px; text-align: center; background: var(--navy-2); border: 1px solid var(--navy-3); border-radius: 5px; padding: 4px 6px; }
+    .s-chip .sm { font-size: 9px; font-weight: 700; color: #93B4CC; }
+    .s-chip .pct { font-size: 12px; font-weight: 800; color: #60A5FA; margin-top: 1px; }
+    .s-chip.peak .pct { color: #34D399; }
+    .s-chip.low .pct  { color: #F87171; }
+
+    /* ── TOOLBAR ── */
+    .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+    .toolbar-right { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+    .toolbar input[type=search] { width: 200px; }
+
+    /* ── TABLE ── */
+    .table-wrap { background: var(--white); border: 1px solid var(--border); border-radius: 8px; overflow: auto; box-shadow: var(--shadow); max-height: calc(100vh - 280px); }
+    table { border-collapse: collapse; width: 100%; font-size: 12px; }
+
+    thead th {
+      padding: 7px 9px; font-size: 10px; font-weight: 700;
+      color: var(--text-3); white-space: nowrap; text-align: left;
+      background: var(--mist); border-bottom: 1px solid var(--border-s);
+      position: sticky; top: 0; z-index: 10;
+      text-transform: uppercase; letter-spacing: .04em;
+    }
+    thead th.r { text-align: right; }
+    thead th.c { text-align: center; }
+
+    /* Sticky first column */
+    th.pin, td.pin {
+      position: sticky; left: 0; z-index: 5;
+      background: var(--mist);
+      border-right: 1px solid var(--border-s);
+      min-width: 56px; max-width: 56px;
+    }
+    td.pin { background: var(--white); }
+    thead th.pin { z-index: 11; }
+    tr:hover td.pin { background: var(--mist); }
+
+    tbody tr { border-bottom: .5px solid var(--border); }
+    tbody tr:hover td { background: #F8FAFB; }
+    tbody tr:hover td.pin { background: #F0F4F8; }
+    tbody td { padding: 5px 9px; vertical-align: middle; }
+
+    /* desc col */
+    .desc-cell { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* PLM */
+    .plm-keep { color: var(--green); font-weight: 600; }
+    .plm-watch { color: var(--amber); font-weight: 600; }
+    .plm-drop  { color: var(--red);   font-weight: 600; }
+
+    /* Index */
+    .idx-input { width: 58px; text-align: center; font-weight: 700; padding: 3px 6px; font-size: 12px; }
+    .idx-input.changed { background: var(--amber-bg); border-color: var(--amber-bd); color: var(--amber); }
+
+    /* Forecast cells */
+    td.fc-auto { text-align: right; cursor: pointer; color: var(--text-2); }
+    td.fc-auto:hover { background: var(--blue-bg) !important; color: var(--blue); }
+    td.fc-hard { text-align: right; cursor: pointer; background: var(--amber-bg) !important; color: var(--amber); font-weight: 700; border-left: 2px solid var(--amber-bd); }
+    td.fc-hard:hover { background: #FEF08A !important; }
+    td.fc-edit { text-align: right; background: var(--blue-bg) !important; padding: 0; }
+    td.fc-edit input { border: none; background: transparent; width: 100%; text-align: right; padding: 5px 9px; font-weight: 700; color: var(--blue); font-size: 12px; font-family: var(--font); }
+
+    /* Totals */
+    tfoot td { padding: 7px 9px; font-weight: 800; font-size: 12px; background: #EEF2F7; border-top: 2px solid var(--border-s); white-space: nowrap; color: var(--navy); }
+    tfoot td.pin { background: #E4EAF2; }
+
+    /* Empty */
+    .empty { text-align: center; padding: 72px 24px; color: var(--text-3); }
+    .empty .icon { font-size: 40px; margin-bottom: 14px; }
+    .empty h3 { font-size: 15px; font-weight: 600; color: var(--text-2); margin-bottom: 6px; }
+    .empty p { font-size: 12px; line-height: 1.7; max-width: 340px; margin: 0 auto 18px; }
+
+    /* Footer hint */
+    .hint { font-size: 10px; color: var(--text-3); margin-top: 8px; line-height: 1.7; }
+    .hint strong { color: var(--text-2); }
+
+    @media (max-width: 700px) {
+      .topbar-sub { display: none; }
+      .page { padding: 10px 12px; }
+      .stats .stat-card .val { font-size: 18px; }
+    }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+/* ─────────────────────────────────────────────
+   CONSTANTS & FORMULA
+───────────────────────────────────────────── */
+const NS_MCP_URL     = "https://1108069.suitetalk.api.netsuite.com/services/mcp/v1/suiteapp/com.netsuite.mcpstandardtools";
+const SEARCH_ID      = "2749";
+const DAMPEN         = 0.15;          // seasonal dampen factor
+const LS_KEY         = "tcc_api_key";
+const LS_NS          = "tcc_ns_data_v2";
+const LS_EDITS       = "tcc_edits_v2";
+const MONTHS         = ["Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb"];
+const MONTH_FULL     = { Jul:"July",Aug:"August",Sep:"September",Oct:"October",Nov:"November",Dec:"December",Jan:"January",Feb:"February" };
+
+// AVG ALL from your Seasonality tab
+const SEASON = { Jan:.08123995, Feb:.11252773, Mar:.08728400, Apr:.10995695, May:.05997925, Jun:.08187274,
+                 Jul:.08089118, Aug:.10067745, Sep:.08181921, Oct:.08021412, Nov:.05216028, Dec:.07137714 };
+
+// Seasonal factor for each month in the 8-month window
+const maxS = Math.max(...MONTHS.map(m => SEASON[m]));
+const minS = Math.min(...MONTHS.map(m => SEASON[m]));
+const seasonClass = m => SEASON[m] === maxS ? "peak" : SEASON[m] === minS ? "low" : "";
+
+// THE FORMULA: Weighted × Index × (1 + 0.15 × season_rate)
+function fc(wm, idx, month) {
+  if (!wm) return 0;
+  return Math.round(wm * (idx || 1) * (1 + DAMPEN * SEASON[month]));
+}
+
+/* ─────────────────────────────────────────────
+   SETUP PANEL
+───────────────────────────────────────────── */
+function SetupPanel({ onSave }) {
+  const [key, setKey] = React.useState("");
+  const valid = key.startsWith("sk-ant-") || key.startsWith("sk-");
+  return (
+    <div className="setup-wrap">
+      <div className="setup-card">
+        <h2>TCC Demand Planning Setup</h2>
+        <p className="sub">
+          Enter your Anthropic API key to connect this tool to NetSuite.
+          Your key is stored only in your browser's local storage — it's never sent anywhere
+          other than the Anthropic API.
+        </p>
+        <div className="form-group">
+          <label className="form-label">Anthropic API Key</label>
+          <input type="password" placeholder="sk-ant-api03-…" value={key}
+            onChange={e => setKey(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && valid && onSave(key)} />
+        </div>
+        <button className="btn-primary" style={{width:"100%",padding:"8px"}}
+          onClick={() => onSave(key)} disabled={!valid}>
+          Connect & Open Forecast →
+        </button>
+        <div className="info-grid">
+          <div className="info-cell">
+            <div className="lbl">NS Saved Search</div>
+            <div className="val">#{SEARCH_ID}</div>
+          </div>
+          <div className="info-cell">
+            <div className="lbl">Forecast Window</div>
+            <div className="val">Jul → Feb</div>
+          </div>
+          <div className="info-cell">
+            <div className="lbl">Formula</div>
+            <div className="val" style={{fontSize:10}}>Wtd Avg × Index × (1 + 0.15 × Season%)</div>
+          </div>
+          <div className="info-cell">
+            <div className="lbl">Seasonality</div>
+            <div className="val">AVG ALL</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   MAIN APP
+───────────────────────────────────────────── */
+function App() {
+  const [apiKey,  setApiKey]  = React.useState(() => localStorage.getItem(LS_KEY) || "");
+  const [items,   setItems]   = React.useState(() => { try { return JSON.parse(localStorage.getItem(LS_NS)||"[]"); } catch { return []; }});
+  const [edits,   setEdits]   = React.useState(() => { try { return JSON.parse(localStorage.getItem(LS_EDITS)||"{}"); } catch { return {}; }});
+  const [loading, setLoading] = React.useState(false);
+  const [loadMsg, setLoadMsg] = React.useState("");
+  const [err,     setErr]     = React.useState("");
+  const [search,  setSearch]  = React.useState("");
+  const [fBrand,  setFBrand]  = React.useState("all");
+  const [fPLM,    setFPLM]    = React.useState("all");
+  const [editCell,setEditCell]= React.useState(null);
+  const [editVal, setEditVal] = React.useState("");
+  const cellRef = React.useRef(null);
+
+  React.useEffect(() => { localStorage.setItem(LS_EDITS, JSON.stringify(edits)); }, [edits]);
+  React.useEffect(() => { if (items.length) localStorage.setItem(LS_NS, JSON.stringify(items)); }, [items]);
+
+  const saveKey = k => { localStorage.setItem(LS_KEY, k); setApiKey(k); };
+  if (!apiKey) return <SetupPanel onSave={saveKey} />;
+
+  /* ── NetSuite fetch ── */
+  const fetchNS = async () => {
+    setLoading(true); setErr(""); setLoadMsg("Connecting to NetSuite…");
+    try {
+      const prompt = `Run the NetSuite saved search with ID "${SEARCH_ID}" and return ALL rows as a JSON array.
+Each element must have these exact keys:
+- "sku":              the Base Item Name field (numeric internal item ID as a string)
+- "weighted_monthly": the Weighted Monthly Qty field (number — use 0 if blank)
+- "description":      item display name / description
+- "plm":              PLM Stage field value
+- "brand":            brand name
+- "category":         Product Family or Category
+
+Include every row even if weighted_monthly is 0. If the same SKU appears multiple times keep each row.
+Reply with ONLY a valid JSON array. No markdown fences, no explanation. Begin with [ and end with ].`;
+
+      setLoadMsg(`Pulling saved search #${SEARCH_ID}…`);
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-ipc": "true"
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 8000,
+          messages: [{ role:"user", content: prompt }],
+          mcp_servers: [{ type:"url", url: NS_MCP_URL, name:"netsuite" }]
+        })
+      });
+      if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+
+      setLoadMsg("Pivoting by SKU…");
+      let parsed = [];
+      for (const blk of (data.content || [])) {
+        const raw = (blk.type==="text" ? blk.text : blk.content?.[0]?.text || "")
+          .replace(/```json\n?/g,"").replace(/```\n?/g,"").trim();
+        const m = raw.match(/\[[\s\S]*\]/);
+        if (m) { try { parsed = JSON.parse(m[0]); break; } catch {} }
+      }
+
+      // Pivot: group by SKU, sum weighted_monthly
+      const pivot = {};
+      for (const r of parsed) {
+        const sku = String(r.sku ?? "").trim();
+        if (!sku || isNaN(+sku) || sku==="0") continue;
+        if (!pivot[sku]) pivot[sku] = { sku, description:r.description||"", brand:r.brand||"", category:r.category||"", plm:r.plm||"", weightedMonthly:0 };
+        pivot[sku].weightedMonthly += parseFloat(r.weighted_monthly) || 0;
+      }
+      const result = Object.values(pivot)
+        .filter(i => i.weightedMonthly > 0)
+        .sort((a,b) => a.description.localeCompare(b.description));
+
+      setItems(result);
+    } catch(e) {
+      setErr(e.message);
+    } finally { setLoading(false); setLoadMsg(""); }
+  };
+
+  /* ── Edit helpers ── */
+  const getEdit = sku => edits[sku] || { index:1, overrides:{} };
+
+  const setIndex = (sku, v) =>
+    setEdits(p => ({ ...p, [sku]: { ...getEdit(sku), index: parseFloat(v)||1 } }));
+
+  const setOverride = (sku, m, v) => {
+    const e = getEdit(sku);
+    setEdits(p => ({ ...p, [sku]: { ...e, overrides:{ ...e.overrides, [m]: Math.round(parseFloat(v)) } } }));
+  };
+
+  const clearOverride = (sku, m) => {
+    const e = getEdit(sku);
+    const o = { ...e.overrides }; delete o[m];
+    setEdits(p => ({ ...p, [sku]: { ...e, overrides: o } }));
+  };
+
+  const startEdit = (sku, m, cur) => {
+    setEditCell({sku,m}); setEditVal(String(cur));
+    setTimeout(() => cellRef.current?.select(), 25);
+  };
+
+  const commitEdit = () => {
+    if (!editCell) return;
+    const v = parseFloat(editVal);
+    if (!isNaN(v) && v >= 0) setOverride(editCell.sku, editCell.m, v);
+    setEditCell(null);
+  };
+
+  /* ── Export ── */
+  const exportXL = () => {
+    const header = ["SKU","Description","Brand","Category","PLM","Wtd Avg (NS)","Index",
+                    ...MONTHS.map(m=>MONTH_FULL[m])];
+    const rows = filtered.map(item => {
+      const e = getEdit(item.sku);
+      return [item.sku, item.description, item.brand, item.category, item.plm,
+              Math.round(item.weightedMonthly), e.index,
+              ...MONTHS.map(m => e.overrides[m]!=null ? e.overrides[m] : fc(item.weightedMonthly,e.index,m))];
+    });
+    const total = ["","TOTAL","","","","","",
+                   ...MONTHS.map(m => totals[m])];
+    const ws = XLSX.utils.aoa_to_sheet([header,...rows,total]);
+    ws["!cols"] = [8,30,14,14,8,10,7,...MONTHS.map(()=>10)].map(w=>({wch:w}));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Forecast Jul-Feb");
+    XLSX.writeFile(wb, "TCC_Forecast_July2026.xlsx");
+  };
+
+  /* ── Filters & derived ── */
+  const brands = React.useMemo(()=>[...new Set(items.map(i=>i.brand).filter(Boolean))].sort(),[items]);
+  const plms   = React.useMemo(()=>[...new Set(items.map(i=>i.plm).filter(Boolean))].sort(),[items]);
+
+  const filtered = React.useMemo(() => items.filter(item => {
+    if (fBrand!=="all" && item.brand!==fBrand) return false;
+    if (fPLM!=="all"  && item.plm!==fPLM)   return false;
+    if (search) {
+      const t=search.toLowerCase();
+      return item.sku.includes(t)||item.description.toLowerCase().includes(t)||item.brand.toLowerCase().includes(t);
+    }
+    return true;
+  }), [items, fBrand, fPLM, search]);
+
+  const totals = React.useMemo(()=>{
+    const t={};
+    MONTHS.forEach(m=>{
+      t[m]=filtered.reduce((s,item)=>{
+        const e=getEdit(item.sku);
+        return s+(e.overrides[m]!=null ? e.overrides[m] : fc(item.weightedMonthly,e.index,m));
+      },0);
+    });
+    return t;
+  },[filtered,edits]);
+
+  const totalUnits = MONTHS.reduce((s,m)=>s+(totals[m]||0),0);
+  const modCount   = Object.keys(edits).filter(sku=>{
+    const e=edits[sku]; return e.index!==1||Object.keys(e.overrides||{}).length>0;
+  }).length;
+
+  const plmCls = plm => plm?.includes("4")?"plm-drop":plm?.includes("3")?"plm-watch":"plm-keep";
+
+  /* ─────────── RENDER ─────────── */
+  return (
+    <>
+      {/* TOP BAR */}
+      <div className="topbar">
+        <div className="topbar-logo">TCC <span>Demand</span></div>
+        <div className="topbar-sub">July 2026 Forecast · NS #{SEARCH_ID} · Wtd Avg × Index × (1 + 0.15 × Season%)</div>
+        <div className="topbar-right">
+          <button className="btn-ghost btn-sm" onClick={()=>{localStorage.removeItem(LS_KEY);setApiKey("");}}>🔑 API Key</button>
+          {items.length>0 && <button className="btn-ghost btn-sm" onClick={exportXL}>⬇ Export Excel</button>}
+          <button className="btn-primary" onClick={fetchNS} disabled={loading}>
+            {loading ? "Loading…" : items.length>0 ? "↻ Refresh NS" : "▶ Pull from NetSuite"}
+          </button>
+        </div>
+      </div>
+
+      <div className="page">
+
+        {/* BANNERS */}
+        {loading && (
+          <div className="banner loading"><div className="spinner"/>{loadMsg}</div>
+        )}
+        {err && (
+          <div className="banner error">
+            ⚠ {err}
+            <button className="btn-sm" style={{marginLeft:8}} onClick={()=>setErr("")}>✕</button>
+          </div>
+        )}
+
+        {/* EMPTY STATE */}
+        {!loading && items.length===0 && (
+          <div className="empty">
+            <div className="icon">📦</div>
+            <h3>No data loaded yet</h3>
+            <p>Click "Pull from NetSuite" to fetch weighted average sales from saved search #{SEARCH_ID} and generate your July–February forecast.</p>
+            <button className="btn-primary" style={{padding:"8px 20px"}} onClick={fetchNS}>▶ Pull from NetSuite</button>
+          </div>
+        )}
+
+        {/* DASHBOARD */}
+        {items.length>0 && (<>
+
+          {/* STATS */}
+          <div className="stats">
+            {[
+              {lbl:"SKUs loaded",    val:items.length.toLocaleString(),     sub:"from NetSuite"},
+              {lbl:"8-Month Total",  val:totalUnits.toLocaleString(),       sub:"forecast units"},
+              {lbl:"Adjusted SKUs",  val:modCount.toLocaleString(),         sub:"index or hard-key"},
+              {lbl:"Showing",        val:filtered.length.toLocaleString(),  sub:`of ${items.length} SKUs`},
+            ].map(s=>(
+              <div key={s.lbl} className="stat-card">
+                <div className="lbl">{s.lbl}</div>
+                <div className="val">{s.val}</div>
+                <div className="sub">{s.sub}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* SEASON BAR */}
+          <div className="season-bar">
+            <span className="season-label">Seasonality · AVG ALL</span>
+            <div className="season-chips">
+              {MONTHS.map(m=>(
+                <div key={m} className={`s-chip ${seasonClass(m)}`}>
+                  <div className="sm">{m}</div>
+                  <div className="pct">{(SEASON[m]*100).toFixed(1)}%</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* TOOLBAR */}
+          <div className="toolbar">
+            <input type="search" placeholder="Search SKU or description…" value={search} onChange={e=>setSearch(e.target.value)} />
+            <select value={fBrand} onChange={e=>setFBrand(e.target.value)}>
+              <option value="all">All brands</option>
+              {brands.map(b=><option key={b} value={b}>{b}</option>)}
+            </select>
+            <select value={fPLM} onChange={e=>setFPLM(e.target.value)}>
+              <option value="all">All PLM stages</option>
+              {plms.map(p=><option key={p} value={p}>{p}</option>)}
+            </select>
+            <div className="toolbar-right">
+              <span style={{fontSize:10,color:"var(--text-3)"}}>
+                Click cell to hard-key · Right-click to reset · 🟡 Amber = override
+              </span>
+              <button className="btn-sm" onClick={()=>{if(confirm("Reset ALL edits?")){setEdits({});localStorage.removeItem(LS_EDITS);}}} title="Reset all index and override edits">↺ Reset all</button>
+            </div>
+          </div>
+
+          {/* TABLE */}
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th className="pin">SKU</th>
+                  <th style={{minWidth:200}}>Description</th>
+                  <th style={{minWidth:90}}>Brand</th>
+                  <th className="c" style={{minWidth:55}}>PLM</th>
+                  <th className="r" style={{minWidth:72}}>Wtd Avg</th>
+                  <th className="c" style={{minWidth:70}}>
+                    Index
+                    <div style={{fontSize:9,fontWeight:400,color:"var(--text-3)",marginTop:2}}>editable</div>
+                  </th>
+                  {MONTHS.map(m=>(
+                    <th key={m} className="r" style={{minWidth:66}}>
+                      {m}
+                      <div style={{fontSize:9,fontWeight:700,color:seasonClass(m)==="peak"?"#166534":seasonClass(m)==="low"?"#991B1B":"var(--text-3)",marginTop:2}}>
+                        {(SEASON[m]*100).toFixed(1)}%
+                      </div>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map(item=>{
+                  const e = getEdit(item.sku);
+                  return (
+                    <tr key={item.sku}>
+                      <td className="pin" style={{fontFamily:"var(--mono)",fontSize:11,color:"var(--text-3)"}}>{item.sku}</td>
+                      <td className="desc-cell" title={item.description}>{item.description}</td>
+                      <td style={{color:"var(--text-3)",fontSize:11}}>{item.brand}</td>
+                      <td style={{textAlign:"center"}}>
+                        <span className={plmCls(item.plm)}>{item.plm?.split(" - ")[0]||"—"}</span>
+                      </td>
+                      <td style={{textAlign:"right",color:"var(--text-2)"}}>{Math.round(item.weightedMonthly).toLocaleString()}</td>
+                      <td style={{textAlign:"center"}}>
+                        <input type="number" className={`idx-input${e.index!==1?" changed":""}`}
+                          value={e.index} step={0.05} min={0}
+                          onChange={ev=>setIndex(item.sku,ev.target.value)} />
+                      </td>
+                      {MONTHS.map(m=>{
+                        const isEdit = editCell?.sku===item.sku && editCell?.m===m;
+                        const over   = e.overrides[m];
+                        const auto   = fc(item.weightedMonthly, e.index, m);
+                        const disp   = over!=null ? over : auto;
+                        if (isEdit) return (
+                          <td key={m} className="fc-edit">
+                            <input ref={cellRef} type="number" value={editVal}
+                              onChange={ev=>setEditVal(ev.target.value)}
+                              onBlur={commitEdit}
+                              onKeyDown={ev=>{
+                                if(ev.key==="Enter"||ev.key==="Tab"){ev.preventDefault();commitEdit();}
+                                if(ev.key==="Escape") setEditCell(null);
+                              }}/>
+                          </td>
+                        );
+                        return (
+                          <td key={m} className={over!=null?"fc-hard":"fc-auto"}
+                            onClick={()=>startEdit(item.sku,m,disp)}
+                            onContextMenu={ev=>{ev.preventDefault();if(over!=null)clearOverride(item.sku,m);}}
+                            title={over!=null?`Hard-keyed: ${disp.toLocaleString()}\nRight-click to revert to auto`:`Auto: ${disp.toLocaleString()}\nClick to override`}>
+                            {disp.toLocaleString()}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td className="pin" style={{fontSize:10,fontWeight:700}}>TOTAL</td>
+                  <td colSpan={5} style={{fontSize:10,color:"var(--text-3)"}}>
+                    {filtered.length} SKUs · July–February 2026
+                  </td>
+                  {MONTHS.map(m=>(
+                    <td key={m} style={{textAlign:"right"}}>{totals[m].toLocaleString()}</td>
+                  ))}
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+
+          <div className="hint">
+            <strong>Index</strong> scales all months for a SKU simultaneously (amber = modified from 1.0). &nbsp;
+            <strong>Monthly cells</strong> are auto-calculated — click to hard-key a specific value, right-click to revert. &nbsp;
+            <strong>Amber cells</strong> = planner override. &nbsp;
+            All changes are saved automatically to your browser.
+          </div>
+
+        </>)}
+      </div>
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
