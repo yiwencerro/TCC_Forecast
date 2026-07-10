@@ -112,7 +112,7 @@
     .plm-dev{color:var(--purple);font-weight:600;font-size:11px}
     .plm-keep{color:var(--green);font-weight:600;font-size:11px}
     .plm-watch{color:var(--amber);font-weight:600;font-size:11px}
-    .plm-drop{color:var(--red);font-weight:600;font-size:11px}
+    .plm-drop{color:#9CA3AF;font-weight:500;font-size:11px}
     .idx-in{width:54px;text-align:center;font-weight:600;font-size:12px;padding:2px 4px}
     .idx-in.changed{background:var(--amberbg);border-color:var(--amberbd);color:var(--amber)}
     td.fc-auto{text-align:right;cursor:pointer;color:var(--text2)}
@@ -276,37 +276,99 @@ function parsePlanningList(buf){
 }
 
 function parseSalesCSV(buf){
-  const wb=XLSX.read(buf,{type:"array",raw:true});
-  const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:""});
-  if(rows.length<2)throw new Error("File appears empty.");
-  const hdr=rows[0].map(c=>String(c).toLowerCase().trim());
+  // Read as plain text for reliable large-CSV handling (72K+ rows)
+  // Pivot: for each Base Item Name × YEAR × MONTH → SUM all customer rows (Invoiced Qty)
+  const text=new TextDecoder("utf-8").decode(new Uint8Array(buf));
+  const lines=text.split(/\r?\n/);
+  if(lines.length<2)throw new Error("File appears empty.");
+
+  // Minimal CSV field parser (handles quoted commas)
+  function splitLine(line){
+    const out=[];let f="",q=false;
+    for(let i=0;i<line.length;i++){
+      const c=line[i];
+      if(c==='"'){q=!q;}
+      else if(c===","&&!q){out.push(f.trim().replace(/^"|"$/g,""));f="";}
+      else f+=c;
+    }
+    out.push(f.trim().replace(/^"|"$/g,""));
+    return out;
+  }
+
+  const hdr=splitLine(lines[0]).map(c=>c.toLowerCase().trim());
   const col={
-    sku:hdr.findIndex(c=>c.includes("base item")||c==="sku"),
-    year:hdr.findIndex(c=>c==="year"),
+    sku:  hdr.findIndex(c=>c.includes("base item name")||c==="base item name"),
+    year: hdr.findIndex(c=>c==="year"),
     month:hdr.findIndex(c=>c==="month"),
     channel:hdr.findIndex(c=>c==="channel"),
-    qty:hdr.findIndex(c=>c.includes("invoiced qty")||c.includes("qty")),
-    desc:hdr.findIndex(c=>c==="description"),
+    qty:  hdr.findIndex(c=>c==="invoiced qty"),   // exact match — avoid matching "Average..." etc.
+    desc: hdr.findIndex(c=>c==="description"),
     brand:hdr.findIndex(c=>c==="brand"),
-    plm:hdr.findIndex(c=>c.includes("plm")),
+    plm:  hdr.findIndex(c=>c.includes("plm stage")),
   };
-  if(col.qty<0||col.sku<0)throw new Error(`Missing columns. Found: ${rows[0].filter(Boolean).join(", ")}`);
-  const totals={};const byChannel={};const channels=new Set();const skuMeta={};
-  for(let i=1;i<rows.length;i++){
-    const row=rows[i];
-    const sku=String(row[col.sku]||"").trim();
-    if(!sku||sku.includes("None"))continue;
-    const yr=parseFloat(row[col.year]);if(isNaN(yr)||yr<2020)continue;
-    const abbr=MONTH_NORM[String(row[col.month]||"").trim()];if(!abbr)continue;
-    const qty=parseFloat(String(row[col.qty]).replace(/,/g,""))||0;
-    const ch=String(row[col.channel]||"Other").trim()||"Other";
+  // Fallback for qty if exact match fails
+  if(col.qty<0) col.qty=hdr.findIndex(c=>c.includes("invoiced qty"));
+  if(col.qty<0||col.sku<0)
+    throw new Error(`Missing required columns.\nLooking for: "Base Item Name", "YEAR", "MONTH", "Invoiced Qty"\nFound: ${hdr.slice(0,16).join(", ")}`);
+
+  // ── PIVOT: SUM Invoiced Qty by SKU × Year × Month (and by channel) ──
+  const totals   ={};  // "sku|yr|abbr"      → total qty (all channels)
+  const byChannel={};  // "sku|yr|abbr|ch"   → qty per channel
+  const channels =new Set();
+  const skuMeta  ={};
+  let rowsProcessed=0;
+
+  for(let i=1;i<lines.length;i++){
+    const line=lines[i].trim();
+    if(!line)continue;
+    const row=splitLine(line);
+
+    // Base Item Name (SKU)
+    const sku=(row[col.sku]||"").trim();
+    if(!sku||sku.toLowerCase().includes("none")||sku==="")continue;
+
+    // Year — must be a 4-digit number 2020–2030
+    const yr=parseInt(row[col.year]||"",10);
+    if(isNaN(yr)||yr<2020||yr>2030)continue;
+
+    // Month — normalise "March    " → "Mar"
+    const abbr=MONTH_NORM[(row[col.month]||"").trim()];
+    if(!abbr)continue;
+
+    // Invoiced Qty — strip commas, convert to number
+    const qty=parseFloat((row[col.qty]||"").replace(/,/g,""))||0;
+
+    // Channel
+    const ch=((row[col.channel]||"").trim())||"Other";
     channels.add(ch);
+
+    // ── Accumulate (this is the pivot SUM) ──
     const tk=`${sku}|${yr}|${abbr}`;
-    totals[tk]=(totals[tk]||0)+qty;
+    totals[tk]   =(totals[tk]   ||0)+qty;
     byChannel[`${tk}|${ch}`]=(byChannel[`${tk}|${ch}`]||0)+qty;
-    if(!skuMeta[sku]&&col.desc>=0){const d=String(row[col.desc]||"");skuMeta[sku]={description:d,brand:col.brand>=0?String(row[col.brand]||""):inferBrand(d),plm:col.plm>=0?String(row[col.plm]||""):""};}
+
+    // SKU metadata — capture from first row seen for this SKU
+    if(!skuMeta[sku]){
+      const d=(col.desc>=0?row[col.desc]||"":"").trim();
+      skuMeta[sku]={
+        description:d,
+        brand:col.brand>=0?(row[col.brand]||"").trim()||inferBrand(d):inferBrand(d),
+        plm:col.plm>=0?(row[col.plm]||"").trim():"",
+      };
+    }
+    rowsProcessed++;
   }
-  return{totals,byChannel,channels:[...channels].filter(c=>c&&c!=="- None -").sort(),skuMeta,rowCount:Object.keys(totals).length};
+
+  if(rowsProcessed===0)throw new Error("No valid rows found. Check the file format.");
+
+  return{
+    totals,
+    byChannel,
+    channels:[...channels].filter(c=>c&&!c.toLowerCase().includes("none")).sort(),
+    skuMeta,
+    rowCount:rowsProcessed,              // actual CSV rows processed (not pivot key count)
+    pivotKeys:Object.keys(totals).length, // unique SKU × Year × Month combinations
+  };
 }
 
 function getSales(sd,sku,yr,abbr,ch){
@@ -402,41 +464,79 @@ function AddSKUPanel({itemList,nsItems,edits,onAdd,onClose}){
 /* ══ FORECAST TABLE ══ */
 function ForecastTable({nsItems,meta,edits,setEdits,itemList,ilMeta,onILLoad,onClear}){
   const [search,setSearch]=useState("");const [fBrand,setFBrand]=useState("all");const [fPLM,setFPLM]=useState("all");
-  const [viewMode,setViewMode]=useState("units"); // "units" | "$"
+  const [viewMode,setViewMode]=useState("units");
   const [showAdd,setShowAdd]=useState(false);
   const [editCell,setEditCell]=useState(null);const [editVal,setEditVal]=useState("");const cellRef=useRef(null);
   const [ilLoading,setILLoading]=useState(false);const ilRef=useRef(null);
+  // Sorting: col id + direction
+  const [sortCol,setSortCol]=useState("description");
+  const [sortDir,setSortDir]=useState("asc");
+  // Selected month for stat card — default = current calendar month (Jul 2026)
+  const [selMonth,setSelMonth]=useState("Jul");
 
   const getE=useCallback(sku=>edits[sku]||{index:1,overrides:{}},[edits]);
   const getBP=useCallback(sku=>itemList?.[sku]?.basePrice||edits[sku]?.basePrice||0,[itemList,edits]);
 
-  // Combine NS items + manually added items
   const allItems=useMemo(()=>{
     const manual=Object.entries(edits).filter(([,e])=>e.manual).map(([sku,e])=>({sku,description:e.description||sku,brand:e.brand||"",plm:e.plm||"",weightedMonthly:e.weightedMonthly||0}));
-    return[...nsItems,...manual].sort((a,b)=>a.description.localeCompare(b.description));
+    return[...nsItems,...manual];
   },[nsItems,edits]);
 
   const setIdx=(sku,v)=>setEdits(p=>({...p,[sku]:{...(p[sku]||{index:1,overrides:{}}),index:parseFloat(v)||1}}));
   const setOv=(sku,m,v)=>setEdits(p=>{const e=p[sku]||{index:1,overrides:{}};return{...p,[sku]:{...e,overrides:{...e.overrides,[m]:Math.round(parseFloat(v))}}};});
   const clrOv=(sku,m)=>setEdits(p=>{const e=p[sku]||{index:1,overrides:{}};const o={...e.overrides};delete o[m];return{...p,[sku]:{...e,overrides:o}};});
-  const removeItem=(sku)=>{if(!confirm("Remove this SKU from the forecast?"))return;setEdits(p=>{const n={...p};delete n[sku];return n;});};
-  const startEdit=(sku,m,cur)=>{setEditCell({sku,m});setEditVal(String(cur));setTimeout(()=>cellRef.current?.select(),25);};
+  const removeItem=sku=>{if(!confirm("Remove this SKU from the forecast?"))return;setEdits(p=>{const n={...p};delete n[sku];return n;});};
+
+  // Click cell → edit AND set selected month for stat card
+  const startEdit=(sku,m,cur)=>{setEditCell({sku,m});setEditVal(String(cur));setSelMonth(m);setTimeout(()=>cellRef.current?.select(),25);};
   const commit=()=>{if(!editCell)return;const v=parseFloat(editVal);if(!isNaN(v)&&v>=0)setOv(editCell.sku,editCell.m,v);setEditCell(null);};
 
-  const addItem=item=>{
-    setEdits(p=>({...p,[item.sku]:{index:1,overrides:{},manual:true,description:item.description,brand:item.brand,plm:item.plm,basePrice:item.basePrice,weightedMonthly:item.weightedMonthly}}));
-  };
+  const addItem=item=>setEdits(p=>({...p,[item.sku]:{index:1,overrides:{},manual:true,description:item.description,brand:item.brand,plm:item.plm,basePrice:item.basePrice,weightedMonthly:item.weightedMonthly}}));
 
   const handleILUpload=f=>{setILLoading(true);const r=new FileReader();r.onload=e=>{try{const il=parsePlanningList(e.target.result);const m={filename:f.name,date:new Date().toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}),count:Object.keys(il).length};localStorage.setItem(LS_IL,JSON.stringify(il));localStorage.setItem(LS_ILMETA,JSON.stringify(m));setILLoading(false);onILLoad(il,m);}catch{setILLoading(false);}};r.readAsArrayBuffer(f);};
 
+  // Sort handler — clicking same col toggles dir; new col starts asc
+  const handleSort=col=>{
+    if(col===sortCol){setSortDir(d=>d==="asc"?"desc":"asc");}
+    else{setSortCol(col);setSortDir("asc");}
+  };
+  // Click month header → also update selected month stat
+  const handleMonthHeader=m=>{handleSort(m);setSelMonth(m);};
+
+  // Sort icon
+  const SI=({col})=><span style={{marginLeft:3,fontSize:8,opacity:.55}}>{sortCol===col?(sortDir==="asc"?"▲":"▼"):"⇅"}</span>;
+
   const brands=useMemo(()=>[...new Set(allItems.map(i=>i.brand).filter(Boolean))].sort(),[allItems]);
   const plms=useMemo(()=>[...new Set(allItems.map(i=>i.plm).filter(Boolean))].sort(),[allItems]);
+
   const filtered=useMemo(()=>allItems.filter(it=>{
     if(fBrand!=="all"&&it.brand!==fBrand)return false;
     if(fPLM!=="all"&&it.plm!==fPLM)return false;
     if(search){const t=search.toLowerCase();return it.sku.includes(t)||it.description.toLowerCase().includes(t)||(it.brand||"").toLowerCase().includes(t);}
     return true;
   }),[allItems,fBrand,fPLM,search]);
+
+  // Apply sort — Drop PLM always pinned to end regardless of chosen column
+  const sorted=useMemo(()=>[...filtered].sort((a,b)=>{
+    // Primary: Drop goes last
+    const aDrop=plmNum(a.plm)==="4", bDrop=plmNum(b.plm)==="4";
+    if(aDrop!==bDrop)return aDrop?1:-1;
+    // Secondary: user-chosen column
+    const mul=sortDir==="asc"?1:-1;
+    if(sortCol==="sku")return mul*((parseInt(a.sku)||0)-(parseInt(b.sku)||0));
+    if(sortCol==="description")return mul*a.description.localeCompare(b.description);
+    if(sortCol==="brand")return mul*(a.brand||"").localeCompare(b.brand||"");
+    if(sortCol==="plm")return mul*(plmNum(a.plm)||"9").localeCompare(plmNum(b.plm)||"9");
+    if(sortCol==="wtdavg")return mul*(a.weightedMonthly-b.weightedMonthly);
+    if(sortCol==="index"){const ea=getE(a.sku),eb=getE(b.sku);return mul*((ea.index||1)-(eb.index||1));}
+    if(MONTHS.includes(sortCol)){
+      const ea=getE(a.sku),eb=getE(b.sku);
+      const ua=ea.overrides[sortCol]!=null?ea.overrides[sortCol]:fc(a.weightedMonthly,ea.index,sortCol);
+      const ub=eb.overrides[sortCol]!=null?eb.overrides[sortCol]:fc(b.weightedMonthly,eb.index,sortCol);
+      return mul*(ua-ub);
+    }
+    return 0;
+  }),[filtered,sortCol,sortDir,edits]);
 
   const totals=useMemo(()=>{const t={};MONTHS.forEach(m=>{let u=0,d=0;filtered.forEach(it=>{const e=getE(it.sku);const units=e.overrides[m]!=null?e.overrides[m]:fc(it.weightedMonthly,e.index,m);u+=units;d+=Math.round(units*(getBP(it.sku)||0));});t[m]={u,d};});return t;},[filtered,edits,itemList]);
 
@@ -446,10 +546,14 @@ function ForecastTable({nsItems,meta,edits,setEdits,itemList,ilMeta,onILLoad,onC
   const modCount=Object.keys(edits).filter(sku=>{const e=edits[sku];return(!e.manual)&&(e.index!==1||Object.keys(e.overrides||{}).length>0);}).length;
   const manualCount=Object.values(edits).filter(e=>e.manual).length;
 
+  // Selected-month totals for stat card
+  const selUnits=totals[selMonth]?.u||0;
+  const selDollars=totals[selMonth]?.d||0;
+
   const exportXL=()=>{
-    const hdr=["SKU","Description","Brand","PLM","Wtd Avg","Index",...MONTHS.map(m=>MFULL[m]+"  Units")];
+    const hdr=["SKU","Description","Brand","PLM","Wtd Avg","Index",...MONTHS.map(m=>MFULL[m]+" Units")];
     if(hasPrice)hdr.push(...MONTHS.map(m=>MFULL[m]+" $"));
-    const body=filtered.map(it=>{
+    const body=sorted.map(it=>{
       const e=getE(it.sku);
       const units=MONTHS.map(m=>e.overrides[m]!=null?e.overrides[m]:fc(it.weightedMonthly,e.index,m));
       const row=[it.sku,it.description,it.brand,plmLabel(it.plm),it.weightedMonthly,e.index,...units];
@@ -462,13 +566,10 @@ function ForecastTable({nsItems,meta,edits,setEdits,itemList,ilMeta,onILLoad,onC
   };
 
   const isDollar=viewMode==="$";
+  const cellValue=(sku,units)=>{if(!isDollar)return units.toLocaleString();const bp=getBP(sku);if(!bp)return"—";return fmtDollar(units*bp);};
 
-  const cellValue=(sku,units)=>{
-    if(!isDollar)return units.toLocaleString();
-    const bp=getBP(sku);
-    if(!bp)return"—";
-    return fmtDollar(units*bp);
-  };
+  // Sortable header style
+  const thSort={cursor:"pointer",userSelect:"none"};
 
   return <div className={`page${isDollar?" dollar-mode":""}`}>
     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:12,gap:8,flexWrap:"wrap"}}>
@@ -478,23 +579,27 @@ function ForecastTable({nsItems,meta,edits,setEdits,itemList,ilMeta,onILLoad,onC
       </div>
       <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
         <button className="btn-ghost btn-sm" onClick={onClear}>↑ Upload new NS file</button>
-        <button className="btn-sm btn-danger" onClick={()=>{if(confirm("Reset all index and override edits (manually added SKUs will also be removed)?"))setEdits({});}}>↺ Reset edits</button>
+        <button className="btn-sm btn-danger" onClick={()=>{if(confirm("Reset all edits?"))setEdits({});}}>↺ Reset edits</button>
         <button className="btn-primary" onClick={exportXL}>⬇ Export Excel</button>
       </div>
     </div>
 
     <div className="stats">
       <StatCard lbl="SKUs" val={allItems.length} sub={manualCount>0?`${meta.count} NS + ${manualCount} added`:"from NS export"}/>
-      {!isDollar&&<StatCard lbl="8-month total" val={totalUnits.toLocaleString()} sub="forecast units"/>}
-      {isDollar&&<StatCard lbl="Est. revenue (8mo)" val={fmtMoney(totalDollars)} sub="units × base price" color="var(--green)"/>}
+      <StatCard lbl="8-month total" val={isDollar&&hasPrice?fmtMoney(totalDollars):totalUnits.toLocaleString()} sub={isDollar&&hasPrice?"est. revenue (units × price)":"forecast units"}/>
+      {/* Selected month stat — updates when you click a month cell or header */}
+      <StatCard
+        lbl={`${MFULL[selMonth]} forecast`}
+        val={isDollar&&hasPrice?fmtMoney(selDollars):selUnits.toLocaleString()}
+        sub={isDollar&&hasPrice?"est. revenue · click month to change":"units · click month to change"}
+        color={isDollar&&hasPrice?"var(--green)":undefined}
+      />
       <StatCard lbl="Adjusted SKUs" val={modCount} sub="index or override"/>
       <StatCard lbl="Showing" val={filtered.length} sub={`of ${allItems.length} SKUs`}/>
-      {isDollar&&!hasPrice&&<StatCard lbl="$ mode" val="No price" sub="Load item list for prices" color="var(--amber)"/>}
     </div>
 
     <SeasonBar/>
 
-    {/* Toolbar */}
     <div className="toolbar">
       <input type="search" placeholder="Search SKU, name or brand…" value={search} onChange={e=>setSearch(e.target.value)} style={{width:200}}/>
       <select value={fBrand} onChange={e=>setFBrand(e.target.value)}><option value="all">All brands</option>{brands.map(b=><option key={b} value={b}>{b}</option>)}</select>
@@ -502,34 +607,43 @@ function ForecastTable({nsItems,meta,edits,setEdits,itemList,ilMeta,onILLoad,onC
       <div className="seg"><button className={!isDollar?"on":""} onClick={()=>setViewMode("units")}>Units</button><button className={isDollar?"on":""} onClick={()=>setViewMode("$")}>$ Est.</button></div>
       <button onClick={()=>setShowAdd(v=>!v)} style={{background:showAdd?"var(--navy)":"var(--white)",color:showAdd?"#fff":"var(--text2)"}}>+ Add SKU</button>
       <div className="toolbar-r">
-        {ilMeta?<span className="il-badge"><i className="ti ti-building-store" aria-hidden/>{ilMeta.count} items loaded</span>
-          :<><input type="file" ref={ilRef} accept=".csv,.xlsx" style={{display:"none"}} onChange={e=>{if(e.target.files[0])handleILUpload(e.target.files[0]);}}/><button className="btn-sm" onClick={()=>ilRef.current?.click()} title="Upload Finance Planning item list for $ pricing and SKU lookup">{ilLoading?"Loading…":"📋 Load item list"}</button></>}
-        <span style={{fontSize:10,color:"var(--text3)"}}>Click cell to override · right-click <span style={{background:"var(--amberbg)",color:"var(--amber)",padding:"1px 5px",borderRadius:3}}>amber</span> to reset</span>
+        {ilMeta
+          ?<span className="il-badge"><i className="ti ti-building-store" aria-hidden/>{ilMeta.count} items</span>
+          :<><input type="file" ref={ilRef} accept=".csv,.xlsx" style={{display:"none"}} onChange={e=>{if(e.target.files[0])handleILUpload(e.target.files[0]);}}/><button className="btn-sm" onClick={()=>ilRef.current?.click()}>{ilLoading?"Loading…":"📋 Load item list"}</button></>}
+        <span style={{fontSize:10,color:"var(--text3)"}}>Click cell to override · right-click <span style={{background:"var(--amberbg)",color:"var(--amber)",padding:"1px 5px",borderRadius:3}}>amber</span> to reset · click header to sort</span>
       </div>
     </div>
 
-    {/* Add SKU panel */}
     {showAdd&&<AddSKUPanel itemList={itemList} nsItems={nsItems} edits={edits} onAdd={addItem} onClose={()=>setShowAdd(false)}/>}
 
-    {/* Table */}
     <div className="twrap">
       <table>
         <thead><tr>
-          <th className="pin" style={{minWidth:56}}>SKU</th>
-          <th style={{minWidth:220}}>Description</th>
-          <th style={{minWidth:88}}>Brand</th>
-          <th className="c" style={{minWidth:60}}>PLM</th>
-          <th className="r" style={{minWidth:68}}>Wtd avg</th>
+          <th className="pin" style={{...thSort,minWidth:56}} onClick={()=>handleSort("sku")}>SKU<SI col="sku"/></th>
+          <th style={{...thSort,minWidth:220}} onClick={()=>handleSort("description")}>Description<SI col="description"/></th>
+          <th style={{...thSort,minWidth:88}} onClick={()=>handleSort("brand")}>Brand<SI col="brand"/></th>
+          <th className="c" style={{...thSort,minWidth:60}} onClick={()=>handleSort("plm")}>PLM<SI col="plm"/></th>
+          <th className="r" style={{...thSort,minWidth:68}} onClick={()=>handleSort("wtdavg")}>Wtd avg<SI col="wtdavg"/></th>
           {hasPrice&&isDollar&&<th className="r" style={{minWidth:68}}>Price</th>}
-          <th className="c" style={{minWidth:68}}>Index<div style={{fontSize:9,fontWeight:400,textTransform:"none",letterSpacing:0,color:"var(--text3)",marginTop:1}}>editable</div></th>
-          {MONTHS.map(m=><th key={m} className="r" style={{minWidth:70}}>
-            {m}<div style={{fontSize:9,fontWeight:700,textTransform:"none",letterSpacing:0,marginTop:1,color:SEASON[m]===maxS?"#16a34a":SEASON[m]===minS?"#dc2626":"var(--text3)"}}>{(SEASON[m]*100).toFixed(1)}%</div>
+          <th className="c" style={{...thSort,minWidth:68}} onClick={()=>handleSort("index")}>
+            Index<SI col="index"/>
+            <div style={{fontSize:9,fontWeight:400,textTransform:"none",letterSpacing:0,color:"var(--text3)",marginTop:1}}>editable</div>
+          </th>
+          {MONTHS.map(m=><th key={m} className="r"
+            style={{...thSort,minWidth:70,background:m===selMonth?"#E8F0FE":undefined,color:m===selMonth?"var(--blue)":undefined}}
+            onClick={()=>handleMonthHeader(m)}
+            title={`Sort by ${MFULL[m]} · click to view ${MFULL[m]} in stat card`}>
+            {m}<SI col={m}/>
+            <div style={{fontSize:9,fontWeight:700,textTransform:"none",letterSpacing:0,marginTop:1,
+              color:m===selMonth?"var(--blue)":SEASON[m]===maxS?"#16a34a":SEASON[m]===minS?"#dc2626":"var(--text3)"}}>
+              {(SEASON[m]*100).toFixed(1)}%
+            </div>
           </th>)}
           <th style={{minWidth:32}}></th>
         </tr></thead>
-        <tbody>{filtered.map(it=>{
+        <tbody>{sorted.map(it=>{
           const e=getE(it.sku);const bp=getBP(it.sku);const isManual=!!e.manual;
-          return <tr key={it.sku} style={isManual?{background:"#FFFFF0"}:undefined}>
+          return <tr key={it.sku} style={isManual?{background:"#FFFFF8"}:undefined}>
             <td className="pin" style={{fontFamily:"var(--mono)",fontSize:11,color:"var(--text3)"}}>{it.sku}{isManual&&<span style={{marginLeft:4,fontSize:9,background:"var(--amberbg)",color:"var(--amber)",padding:"0 3px",borderRadius:2}}>new</span>}</td>
             <td style={{maxWidth:230,overflow:"hidden",textOverflow:"ellipsis"}} title={it.description}>{it.description}</td>
             <td style={{color:"var(--text3)",fontSize:11}}>{it.brand}</td>
@@ -543,26 +657,35 @@ function ForecastTable({nsItems,meta,edits,setEdits,itemList,ilMeta,onILLoad,onC
               const isEdit=editCell?.sku===it.sku&&editCell?.m===m;
               const over=e.overrides[m];const units=over!=null?over:fc(it.weightedMonthly,e.index,m);
               const disp=cellValue(it.sku,units);
+              const isSel=m===selMonth;
               if(isEdit)return <td key={m} className="fc-edit"><input ref={cellRef} type="number" value={editVal} onChange={ev=>setEditVal(ev.target.value)} onBlur={commit} onKeyDown={ev=>{if(ev.key==="Enter"||ev.key==="Tab"){ev.preventDefault();commit();}if(ev.key==="Escape")setEditCell(null);}}/></td>;
-              return <td key={m} className={over!=null?"fc-hard":"fc-auto"} onClick={()=>startEdit(it.sku,m,units)} onContextMenu={ev=>{ev.preventDefault();if(over!=null)clrOv(it.sku,m);}} title={over!=null?`Hard-keyed: ${units.toLocaleString()} units\nRight-click to revert`:`Auto: ${units.toLocaleString()} units\nClick to override`}>{disp}</td>;
+              return <td key={m}
+                className={over!=null?"fc-hard":"fc-auto"}
+                style={isSel&&over==null?{background:"#F0F5FF"}:undefined}
+                onClick={()=>startEdit(it.sku,m,units)}
+                onContextMenu={ev=>{ev.preventDefault();if(over!=null)clrOv(it.sku,m);}}
+                title={over!=null?`Hard-keyed: ${units.toLocaleString()} units\nRight-click to revert`:`Auto: ${units.toLocaleString()} units\nClick to override`}>
+                {disp}
+              </td>;
             })}
             <td style={{textAlign:"center",padding:"2px 4px"}}>
-              {isManual&&<button className="btn-sm btn-danger" style={{padding:"1px 5px",fontSize:10}} onClick={()=>removeItem(it.sku)} title="Remove this SKU">✕</button>}
+              {isManual&&<button className="btn-sm btn-danger" style={{padding:"1px 5px",fontSize:10}} onClick={()=>removeItem(it.sku)} title="Remove">✕</button>}
             </td>
           </tr>;
         })}</tbody>
         <tfoot><tr>
           <td className="pin">Total</td>
-          <td colSpan={hasPrice&&isDollar?5:4} style={{fontSize:10,color:"var(--text3)",fontWeight:400}}>{filtered.length} SKUs · July–February 2026{isDollar&&hasPrice?" · Est. Revenue":"  · Units"}</td>
+          <td colSpan={hasPrice&&isDollar?5:4} style={{fontSize:10,color:"var(--text3)",fontWeight:400}}>{filtered.length} SKUs · July–February 2026{isDollar&&hasPrice?" · Est. Revenue":" · Units"}</td>
           <td></td>
-          {MONTHS.map(m=>{const{u,d}=totals[m];return <td key={m} style={{textAlign:"right"}}>{isDollar&&hasPrice?fmtDollar(d):u.toLocaleString()}</td>;})}
+          {MONTHS.map(m=>{const{u,d}=totals[m];const isSel=m===selMonth;return <td key={m} style={{textAlign:"right",background:isSel?"#E8F0FE":undefined,color:isSel?"var(--blue)":undefined,fontWeight:isSel?700:undefined}}>{isDollar&&hasPrice?fmtDollar(d):u.toLocaleString()}</td>;})}
           <td></td>
         </tr></tfoot>
       </table>
     </div>
     <div className="hint">
-      <strong>PLM</strong>: Keep=active, Watch=declining, Drop=discontinuing, Dev=in development. &nbsp;
-      <strong>Index</strong>: multiplier per SKU (amber = modified from 1.0). Click any month cell to hard-key. Right-click amber to revert. New items tagged <span style={{background:"var(--amberbg)",color:"var(--amber)",padding:"0 3px",borderRadius:2,fontSize:10}}>new</span> can be removed with ✕. All edits save automatically.
+      <strong>Sort</strong>: click any column header (▲ asc / ▼ desc). &nbsp;
+      <strong>Selected month</strong> <span style={{background:"#E8F0FE",color:"var(--blue)",padding:"0 4px",borderRadius:2,fontSize:10}}>{selMonth}</span>: click any month header or cell to update the stat card. &nbsp;
+      <strong>Index</strong>: multiplier per SKU (amber = changed). Click cell to hard-key · right-click amber to revert. <span style={{background:"var(--amberbg)",color:"var(--amber)",padding:"0 3px",borderRadius:2,fontSize:10}}>new</span> items removable with ✕.
     </div>
   </div>;
 }
@@ -570,7 +693,7 @@ function ForecastTable({nsItems,meta,edits,setEdits,itemList,ilMeta,onILLoad,onC
 /* ══ ACTUAL VS FORECAST TAB ══ */
 function ActualUpload({onLoad,savedMeta,hasNS}){
   const [file,setFile]=useState(null);const [err,setErr]=useState("");const [loading,setLoading]=useState(false);
-  const handle=f=>{setFile(f);setErr("");setLoading(true);const r=new FileReader();r.onload=e=>{try{const sd=parseSalesCSV(e.target.result);const m={filename:f.name,date:new Date().toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}),rows:sd.rowCount};localStorage.setItem(LS_SALES,JSON.stringify({totals:sd.totals,byChannel:sd.byChannel,channels:sd.channels,skuMeta:sd.skuMeta}));localStorage.setItem(LS_SMETA,JSON.stringify(m));setLoading(false);onLoad(sd,m);}catch(ex){setErr(ex.message);setLoading(false);}};r.readAsArrayBuffer(f);};
+  const handle=f=>{setFile(f);setErr("");setLoading(true);const r=new FileReader();r.onload=e=>{try{const sd=parseSalesCSV(e.target.result);const m={filename:f.name,date:new Date().toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}),rows:sd.rowCount,pivotKeys:sd.pivotKeys};try{localStorage.setItem(LS_SALES,JSON.stringify({totals:sd.totals,byChannel:sd.byChannel,channels:sd.channels,skuMeta:sd.skuMeta}));localStorage.setItem(LS_SMETA,JSON.stringify(m));}catch(e){}setLoading(false);onLoad(sd,m);}catch(ex){setErr(ex.message);setLoading(false);}};r.readAsArrayBuffer(f);};
   return <div className="upload-wrap"><div className="upload-card">
     <h2>Actual vs Forecast — Sales history</h2>
     <p className="sub">Upload the NetSuite sales history CSV to compare actual sales against the forecast by SKU and month.</p>
@@ -655,7 +778,7 @@ function ActualTable({nsItems,edits,itemList,salesData,meta,onClear}){
   const hasNS=nsItems&&nsItems.length>0;
   return <div className="page">
     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:12,gap:8,flexWrap:"wrap"}}>
-      <div><div style={{fontSize:16,fontWeight:600}}>Actual vs forecast</div><div style={{fontSize:11,color:"var(--text3)"}}>{meta.filename} · {meta.rows?.toLocaleString()} rows · {meta.date}{!hasNS&&" · ⚠ No forecast data"}</div></div>
+      <div><div style={{fontSize:16,fontWeight:600}}>Actual vs forecast</div><div style={{fontSize:11,color:"var(--text3)"}}>{meta.filename} · {meta.rows?.toLocaleString()} rows processed → {meta.pivotKeys?.toLocaleString()||"—"} SKU × Month totals · {meta.date}{!hasNS&&" · ⚠ No forecast data"}</div></div>
       <div style={{display:"flex",gap:6,flexWrap:"wrap"}}><button className="btn-ghost btn-sm" onClick={onClear}>↑ Upload new file</button><button className="btn-primary" onClick={exportXL}>⬇ Export Excel</button></div>
     </div>
     <div className="stats">
