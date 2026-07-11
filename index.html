@@ -126,9 +126,9 @@
     .hint{font-size:10px;color:var(--text3);margin-top:8px;line-height:1.8}
     /* ACTUAL CELLS */
     .mc{padding:5px 8px;border-bottom:.5px solid var(--border);text-align:right;vertical-align:top;min-width:90px}
-    .mc .fc-row{font-size:10px;color:var(--text3)}
-    .mc .act-row{font-size:13px;font-weight:700}
-    .mc .var-row{font-size:10px;font-weight:500;margin-top:1px}
+    .mc .fc-row{font-size:11px;color:var(--text3);margin-bottom:1px}
+    .mc .act-row{font-size:11px;font-weight:700}
+    .mc .var-row{font-size:10px;font-weight:500;margin-top:2px}
     .mc .py-row{font-size:10px;color:#2563EB;margin-top:1px}
     .mc.future{background:#F8FAFB}.mc.on-track{background:#F0FDF4}.mc.behind{background:#FFFBEB}.mc.miss{background:#FFF1F2}
     .mh{text-align:center;padding:4px 6px;min-width:90px}
@@ -298,21 +298,24 @@ function parsePlanningList(buf){
 
 function parseSalesCSV(buf){
   // Read as plain text for reliable large-CSV handling (72K+ rows)
-  // Pivot: for each Base Item Name × YEAR × MONTH → SUM all customer rows (Invoiced Qty)
-  const text=new TextDecoder("utf-8").decode(new Uint8Array(buf));
+  // PIVOT: SUM all Invoiced Qty rows sharing the same Base Item Name × YEAR × MONTH
+  //        This includes ALL customers, ALL channels — exactly like a pivot table in Excel
+  let text=new TextDecoder("utf-8").decode(new Uint8Array(buf));
+  // Strip UTF-8 BOM if present (common in NetSuite exports)
+  if(text.charCodeAt(0)===0xFEFF)text=text.slice(1);
   const lines=text.split(/\r?\n/);
   if(lines.length<2)throw new Error("File appears empty.");
 
-  // Minimal CSV field parser (handles quoted commas)
+  // CSV field parser — handles fields containing quoted commas
   function splitLine(line){
     const out=[];let f="",q=false;
     for(let i=0;i<line.length;i++){
       const c=line[i];
       if(c==='"'){q=!q;}
-      else if(c===","&&!q){out.push(f.trim().replace(/^"|"$/g,""));f="";}
+      else if(c===","&&!q){out.push(f.trim());f="";}
       else f+=c;
     }
-    out.push(f.trim().replace(/^"|"$/g,""));
+    out.push(f.trim());
     return out;
   }
 
@@ -851,7 +854,7 @@ function ActualTable({nsItems,edits,itemList,salesData,meta,onClear}){
   const hasNS=nsItems&&nsItems.length>0;
   return <div className="page">
     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:12,gap:8,flexWrap:"wrap"}}>
-      <div><div style={{fontSize:16,fontWeight:600}}>Actual vs forecast</div><div style={{fontSize:11,color:"var(--text3)"}}>{meta.filename} · {meta.rows?.toLocaleString()} rows processed → {meta.pivotKeys?.toLocaleString()||"—"} SKU × Month totals · {meta.date}{!hasNS&&" · ⚠ No forecast data"}</div></div>
+      <div><div style={{fontSize:16,fontWeight:600}}>Actual vs forecast</div><div style={{fontSize:11,color:"var(--text3)"}}>{meta.filename} · {meta.rows?.toLocaleString()} rows → {meta.pivotKeys?.toLocaleString()||"—"} SKU×Month totals (all customers combined) · {meta.date}{!hasNS&&" · ⚠ No forecast data"}</div></div>
       <div style={{display:"flex",gap:6,flexWrap:"wrap"}}><button className="btn-ghost btn-sm" onClick={onClear}>↑ Upload new file</button><button className="btn-primary" onClick={exportXL}>⬇ Export Excel</button></div>
     </div>
     <div className="stats">
